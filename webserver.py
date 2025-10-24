@@ -1,49 +1,55 @@
-# webserver.py
+# webserver.py (FULL AND FINAL CODE with Lifespan)
 
 import math
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
-import magic
-from pyrogram.file_id import FileId, FileType
+from pyrogram.file_id import FileId
 from pyrogram import raw, Client
 
 from config import Config
+from bot import bot, initialize_clients, multi_clients, work_loads, get_readable_file_size
 
-app = FastAPI()
+# --- Lifespan Manager (Starts and Stops the Bot with the Server) ---
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Application startup
+    print("Web server is starting up...")
+    print("Starting bot...")
+    await bot.start()
+    print("Main bot started.")
+    print("Initializing clients...")
+    await initialize_clients(bot)
+    print("All clients initialized. Application startup complete.")
+    yield
+    # Application shutdown
+    print("Web server is shutting down...")
+    if bot.is_initialized:
+        await bot.stop()
+    print("Bot stopped.")
+
+
+# --- FastAPI App ---
+app = FastAPI(lifespan=lifespan)
 templates = Jinja2Templates(directory="templates")
-
-# In-memory dictionary to share bot clients and workloads
-multi_clients = {}
-work_loads = {}
 
 class_cache = {}
 
-# =======================================================
-# == HEALTH CHECK ROUTE FOR RENDER (Sabse Upar)        ==
-# =======================================================
-# ...
+# --- Health Check Route ---
 @app.api_route("/", methods=["GET", "HEAD"])
 async def root():
     """Health check route for Render that handles GET and HEAD"""
     return {"status": "ok", "message": "Server is healthy and running!"}
-# =======================================================
 
-# Helper function
-def get_readable_file_size(size_in_bytes):
-    if not size_in_bytes: return '0B'
-    power, n = 1024, 0
-    power_labels = {0: '', 1: 'K', 2: 'M', 3: 'G'}
-    while size_in_bytes >= power and n < len(power_labels):
-        size_in_bytes /= power
-        n += 1
-    return f"{size_in_bytes:.2f} {power_labels[n]}B"
 
+# --- ByteStreamer Class for Streaming Logic ---
 class ByteStreamer:
     def __init__(self, client: Client):
         self.client = client
 
-    async def get_location(self, file_id: FileId):
+    @staticmethod
+    async def get_location(file_id: FileId):
         return raw.types.InputDocumentFileLocation(
             id=file_id.media_id,
             access_hash=file_id.access_hash,
@@ -87,19 +93,20 @@ class ByteStreamer:
             work_loads[index] -= 1
 
 
+# --- API Routes ---
 @app.get("/show/{unique_id}")
 async def show_file_page(request: Request, unique_id: str):
     try:
         main_bot = multi_clients.get(0)
         if not main_bot: raise HTTPException(503, "Bot not initialized yet")
 
-        async for msg in main_bot.get_chat_history(Config.LOG_CHANNEL, limit=2000): # Limit badha di hai
+        async for msg in main_bot.get_chat_history(Config.LOG_CHANNEL, limit=2000):
             if msg.text and f"Unique ID: `{unique_id}`" in msg.text:
                 storage_msg_id = int(msg.text.split("Storage Msg ID: `")[1].split("`")[0])
                 
                 file_msg = await main_bot.get_messages(Config.STORAGE_CHANNEL, storage_msg_id)
                 media = file_msg.document or file_msg.video or file_msg.audio
-                if not media: raise HTTPException(404)
+                if not media: raise HTTPException(404, "File media not found in message.")
 
                 file_name = media.file_name
                 file_size = get_readable_file_size(media.file_size)
@@ -120,7 +127,7 @@ async def show_file_page(request: Request, unique_id: str):
                 
         raise HTTPException(status_code=404, detail="Link expired or invalid.")
     except Exception as e:
-        print(f"Error in /show: {e}")
+        print(f"Error in /show: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail="Internal Server Error")
 
 
@@ -130,7 +137,7 @@ async def stream_handler(request: Request, msg_id: int, file_name: str):
     
     index = min(work_loads, key=work_loads.get, default=0)
     client = multi_clients.get(index)
-    if not client: raise HTTPException(503, "No available clients")
+    if not client: raise HTTPException(503, "No available clients to stream.")
 
     if client in class_cache:
         tg_connect = class_cache[client]
@@ -140,10 +147,10 @@ async def stream_handler(request: Request, msg_id: int, file_name: str):
 
     try:
         message = await client.get_messages(Config.STORAGE_CHANNEL, msg_id)
-        if not (message.video or message.document) or message.empty:
+        if not (message.video or message.document or message.audio) or message.empty:
             raise FileNotFoundError
 
-        media = message.video or message.document
+        media = message.document or message.video or message.audio
         file_id = FileId.decode(media.file_id)
         file_size = media.file_size
         
@@ -156,7 +163,7 @@ async def stream_handler(request: Request, msg_id: int, file_name: str):
                 until_bytes = int(until_bytes_str)
 
         if (until_bytes >= file_size) or (from_bytes < 0):
-            raise HTTPException(416)
+            raise HTTPException(416, "Range not satisfiable")
 
         chunk_size = 1024 * 1024
         req_length = until_bytes - from_bytes + 1
@@ -181,5 +188,5 @@ async def stream_handler(request: Request, msg_id: int, file_name: str):
     except FileNotFoundError:
         raise HTTPException(404, "File not found on Telegram.")
     except Exception as e:
-        print(e)
+        print(f"Error in /dl: {traceback.format_exc()}")
         raise HTTPException(500, "Internal streaming error.")
