@@ -1,7 +1,8 @@
-# webserver.py (FULL UPDATED CODE with DB)
+# webserver.py (FULL UPDATED CODE)
 
 import math
 import traceback
+import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse
@@ -12,7 +13,7 @@ from pyrogram.session import Session, Auth
 
 from config import Config
 from bot import bot, initialize_clients, multi_clients, work_loads, get_readable_file_size
-from database import db # Database import kiya gaya
+from database import db
 
 # --- Lifespan Manager ---
 @asynccontextmanager
@@ -30,10 +31,8 @@ async def lifespan(app: FastAPI):
         await bot.stop()
     print("Bot stopped.")
 
-# --- FastAPI App ---
 app = FastAPI(lifespan=lifespan)
 templates = Jinja2Templates(directory="templates")
-
 class_cache = {}
 
 # --- Health Check Route ---
@@ -41,101 +40,87 @@ class_cache = {}
 async def root():
     return {"status": "ok", "message": "Server is healthy and running!"}
 
-# --- ByteStreamer Class for Streaming Logic ---
+# --- Helper function for masking filename ---
+def mask_filename(name: str) -> str:
+    if not name:
+        return "Protected File"
+    
+    resolutions = ["2160p", "2160p HEVC", "1080p", "1080p HEVC", "720p", "720p HEVC", "480p", "480p HEVC", "360p"]
+    res_part = ""
+    for res in resolutions:
+        if res in name:
+            res_part = f" {res}"
+            name = name.replace(res, "")
+            break
+
+    base, ext = os.path.splitext(name)
+    masked_base = ''.join(c if (i % 3 == 0 and c.isalnum()) else '*' for i, c in enumerate(base))
+    return f"{masked_base}{res_part}{ext}"
+
 class ByteStreamer:
-    def __init__(self, client: Client):
-        self.client = client
-
+    # ... (ByteStreamer class code is unchanged)
+    def __init__(self, client: Client): self.client = client
     @staticmethod
-    async def get_location(file_id: FileId):
-        return raw.types.InputDocumentFileLocation(
-            id=file_id.media_id,
-            access_hash=file_id.access_hash,
-            file_reference=file_id.file_reference,
-            thumb_size=file_id.thumbnail_size,
-        )
-
+    async def get_location(file_id: FileId): return raw.types.InputDocumentFileLocation(id=file_id.media_id, access_hash=file_id.access_hash, file_reference=file_id.file_reference, thumb_size=file_id.thumbnail_size)
     async def yield_file(self, file_id: FileId, index: int, offset: int, first_part_cut: int, last_part_cut: int, part_count: int, chunk_size: int):
-        client = self.client
-        work_loads[index] += 1
-        
+        client = self.client; work_loads[index] += 1
         media_session = client.media_sessions.get(file_id.dc_id)
         if media_session is None:
             if file_id.dc_id != await client.storage.dc_id():
                 auth_key = await Auth(client, file_id.dc_id, await client.storage.test_mode()).create()
                 media_session = Session(client, file_id.dc_id, auth_key, await client.storage.test_mode(), is_media=True)
                 await media_session.start()
-                
                 exported_auth = await client.invoke(raw.functions.auth.ExportAuthorization(dc_id=file_id.dc_id))
                 await media_session.invoke(raw.functions.auth.ImportAuthorization(id=exported_auth.id, bytes=exported_auth.bytes))
-            else:
-                media_session = client.session
-            
+            else: media_session = client.session
             client.media_sessions[file_id.dc_id] = media_session
-        
         location = await self.get_location(file_id)
         current_part = 1
-        
         try:
             while current_part <= part_count:
-                r = await media_session.invoke(
-                    raw.functions.upload.GetFile(location=location, offset=offset, limit=chunk_size),
-                    retries=0
-                )
+                r = await media_session.invoke(raw.functions.upload.GetFile(location=location, offset=offset, limit=chunk_size), retries=0)
                 if isinstance(r, raw.types.upload.File):
                     chunk = r.bytes
                     if not chunk: break
-                    
                     if part_count == 1: yield chunk[first_part_cut:last_part_cut]
                     elif current_part == 1: yield chunk[first_part_cut:]
                     elif current_part == part_count: yield chunk[:last_part_cut]
                     else: yield chunk
-                    
-                    current_part += 1
-                    offset += chunk_size
+                    current_part += 1; offset += chunk_size
                 else: break
-        finally:
-            work_loads[index] -= 1
+        finally: work_loads[index] -= 1
 
 # --- API Routes ---
 @app.get("/show/{unique_id}")
 async def show_file_page(request: Request, unique_id: str):
     try:
         storage_msg_id = await db.get_link(unique_id)
-        if not storage_msg_id:
-            raise HTTPException(status_code=404, detail="Link expired or invalid. Please generate a new link.")
-        
+        if not storage_msg_id: raise HTTPException(404, "Link expired or invalid.")
         main_bot = multi_clients.get(0)
-        if not main_bot: raise HTTPException(503, "Bot not initialized yet")
-
+        if not main_bot: raise HTTPException(503, "Bot not initialized.")
         file_msg = await main_bot.get_messages(Config.STORAGE_CHANNEL, storage_msg_id)
         media = file_msg.document or file_msg.video or file_msg.audio
-        if not media: raise HTTPException(404, "File media not found in message.")
-
-        file_name = media.file_name
+        if not media: raise HTTPException(404, "File media not found.")
+        
+        original_file_name = media.file_name
+        masked_name = mask_filename(original_file_name)
+        
         file_size = get_readable_file_size(media.file_size)
         mime_type = media.mime_type or "application/octet-stream"
-        
-        is_video = mime_type.startswith("video/")
-        is_audio = mime_type.startswith("audio/")
-        
-        dl_link = f"{Config.BASE_URL}/dl/{storage_msg_id}/{file_name}"
+        is_media = mime_type.startswith("video/") or mime_type.startswith("audio/")
+        dl_link = f"{Config.BASE_URL}/dl/{storage_msg_id}"
         
         context = {
-            "request": request, "file_name": file_name, "file_size": file_size,
-            "is_media": is_video or is_audio, "direct_dl_link": dl_link,
+            "request": request, "file_name": masked_name, "file_size": file_size,
+            "is_media": is_media, "direct_dl_link": dl_link,
             "mx_player_link": f"intent:{dl_link}#Intent;action=android.intent.action.VIEW;type={mime_type};end",
             "vlc_player_link": f"vlc://{dl_link}"
         }
         return templates.TemplateResponse("show.html", context)
-                
-    except Exception as e:
-        print(f"Error in /show: {traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail="Internal Server Error")
+    except Exception: print(f"Error in /show: {traceback.format_exc()}"); raise HTTPException(500)
 
-
-@app.get("/dl/{msg_id}/{file_name}")
-async def stream_handler(request: Request, msg_id: int, file_name: str):
+@app.get("/dl/{msg_id}")
+async def stream_handler(request: Request, msg_id: int):
     range_header = request.headers.get("Range", 0)
     
     index = min(work_loads, key=work_loads.get, default=0)
@@ -157,16 +142,14 @@ async def stream_handler(request: Request, msg_id: int, file_name: str):
         file_id = FileId.decode(media.file_id)
         file_size = media.file_size
         
-        from_bytes = 0
-        until_bytes = file_size - 1
+        from_bytes, until_bytes = 0, file_size - 1
         if range_header:
             from_bytes_str, until_bytes_str = range_header.replace("bytes=", "").split("-")
             from_bytes = int(from_bytes_str)
             if until_bytes_str:
                 until_bytes = int(until_bytes_str)
 
-        if (until_bytes >= file_size) or (from_bytes < 0):
-            raise HTTPException(416, "Range not satisfiable")
+        if (until_bytes >= file_size) or (from_bytes < 0): raise HTTPException(416)
 
         chunk_size = 1024 * 1024
         req_length = until_bytes - from_bytes + 1
@@ -190,6 +173,5 @@ async def stream_handler(request: Request, msg_id: int, file_name: str):
         )
     except FileNotFoundError:
         raise HTTPException(404, "File not found on Telegram.")
-    except Exception as e:
-        print(f"Error in /dl: {traceback.format_exc()}")
-        raise HTTPException(500, "Internal streaming error.")
+    except Exception:
+        print(f"Error in /dl: {traceback.format_exc()}"); raise HTTPException(500)
