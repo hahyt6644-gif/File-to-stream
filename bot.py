@@ -8,7 +8,7 @@ from urllib.parse import urlparse
 import aiohttp
 import aiofiles
 from pyrogram import Client, filters
-from pyrogram.errors import FloodWait, UserNotParticipant
+from pyrogram.errors import FloodWait
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 
 from config import Config
@@ -58,23 +58,17 @@ async def initialize_clients(main_bot_instance):
     multi_clients[0] = main_bot_instance
     work_loads[0] = 0
     
-    # --- YAHAN CHANNEL ID FETCH KARNE KA FIX HAI ---
+    # --- FINAL FIX for 'Peer id invalid' ERROR ---
     try:
-        print("Fetching essential channel information using invite links...")
-        # Link se chat object fetch karna
-        log_chat = await main_bot_instance.get_chat(Config.LOG_CHANNEL_LINK)
-        storage_chat = await main_bot_instance.get_chat(Config.STORAGE_CHANNEL_LINK)
-        # Sahi ID ko Config object mein save karna
-        Config.LOG_CHANNEL = log_chat.id
-        Config.STORAGE_CHANNEL = storage_chat.id
-        print(f"Channels identified: LOG_CHANNEL={Config.LOG_CHANNEL}, STORAGE_CHANNEL={Config.STORAGE_CHANNEL}")
-    except UserNotParticipant:
-        print("!!! FATAL ERROR: The main bot is not a member of one of the channels. Please add it and restart.")
-        return
+        print(f"Pinging STORAGE_CHANNEL ({Config.STORAGE_CHANNEL}) to cache its info...")
+        # Send and delete a message to force Pyrogram to cache the channel's access hash
+        ping_message = await main_bot_instance.send_message(Config.STORAGE_CHANNEL, "<code>.</code>")
+        await ping_message.delete()
+        print("Channel info cached successfully.")
     except Exception as e:
-        print(f"!!! FATAL ERROR: Could not get channel info from links. Error: {e}")
+        print(f"!!! FATAL ERROR: Could not ping STORAGE_CHANNEL. Make sure the bot is an admin with 'Post Messages' permission. Error: {e}")
         return
-    # --- FIX YAHAN KHATAM HOTA HAI ---
+    # --- END OF FIX ---
 
     all_tokens = TokenParser.parse_from_env()
     if not all_tokens:
