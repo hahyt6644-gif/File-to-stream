@@ -1,4 +1,4 @@
-# webserver.py (THE REAL FINAL VERSION - NO MORE ERRORS)
+# webserver.py (THE REAL-REAL-FINAL-FINAL CODE)
 
 import math
 import traceback
@@ -13,18 +13,29 @@ from pyrogram import raw, Client
 from pyrogram.session import Session, Auth
 
 from config import Config
-# --- YAHAN BADLAV HAI: link_db ko bot se import nahi karna ---
 from bot import bot, initialize_clients, multi_clients, work_loads, get_readable_file_size
-# --- YAHAN BADLAV HAI: db se link_db ko import karna (indirectly) ---
 from database import db
 
-# --- Lifespan Manager (Starts and Stops the Bot with the Server) ---
+# --- Lifespan Manager ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("Web server is starting up...")
     print("Starting bot...")
     await bot.start()
     print("Main bot started.")
+
+    # --- YEH HAI ASLI FINAL FIX ---
+    # Bot ko uske saare chats ki list fetch karne ke liye force karo
+    # Isse saare channels (including STORAGE_CHANNEL) uski memory (cache) mein aa jayenge.
+    try:
+        print("Caching all chats the bot is a member of...")
+        async for _ in bot.get_dialogs():
+            pass
+        print("Chat caching complete. Bot now knows about all its channels.")
+    except Exception as e:
+        print(f"!!! FATAL ERROR: Could not get dialogs. This is unexpected. Error: {e}")
+    # --- FIX KHATAM ---
+    
     print("Initializing clients...")
     await initialize_clients(bot)
     print("All clients initialized. Application startup complete.")
@@ -38,12 +49,10 @@ app = FastAPI(lifespan=lifespan)
 templates = Jinja2Templates(directory="templates")
 class_cache = {}
 
-# --- Health Check Route ---
 @app.api_route("/", methods=["GET", "HEAD"])
 async def root():
     return {"status": "ok", "message": "Server is healthy and running!"}
 
-# --- Helper function for masking filename ---
 def mask_filename(name: str) -> str:
     if not name: return "Protected File"
     resolutions = ["2160p", "1080p", "720p", "480p", "360p"]
@@ -86,16 +95,13 @@ class ByteStreamer:
                 else: break
         finally: work_loads[index] -= 1
 
-# --- API Routes ---
 @app.get("/show/{unique_id}")
 async def show_file_page(request: Request, unique_id: str):
     try:
         storage_msg_id = await db.get_link(unique_id)
         if not storage_msg_id: raise HTTPException(404, "Link expired or invalid.")
-        
         main_bot = multi_clients.get(0)
         if not main_bot: raise HTTPException(503, "Bot not initialized.")
-        
         file_msg = await main_bot.get_messages(Config.STORAGE_CHANNEL, storage_msg_id)
         media = file_msg.document or file_msg.video or file_msg.audio
         if not media: raise HTTPException(404, "File media not found.")
@@ -105,8 +111,6 @@ async def show_file_page(request: Request, unique_id: str):
         file_size = get_readable_file_size(media.file_size)
         mime_type = media.mime_type or "application/octet-stream"
         is_media = mime_type.startswith("video/") or mime_type.startswith("audio/")
-        
-        # --- YAHAN FINAL LINK BINA FILE NAME KE HAI ---
         dl_link = f"{Config.BASE_URL}/dl/{storage_msg_id}"
         
         context = {
@@ -116,55 +120,37 @@ async def show_file_page(request: Request, unique_id: str):
             "vlc_player_link": f"vlc://{dl_link}"
         }
         return templates.TemplateResponse("show.html", context)
-                
-    except Exception:
-        print(f"Error in /show: {traceback.format_exc()}"); raise HTTPException(500)
+    except Exception: print(f"Error in /show: {traceback.format_exc()}"); raise HTTPException(500)
 
-# --- YAHAN FINAL STREAMING ROUTE BINA FILE NAME KE HAI ---
 @app.get("/dl/{msg_id}")
 async def stream_handler(request: Request, msg_id: int):
     range_header = request.headers.get("Range", 0)
-    
     index = min(work_loads, key=work_loads.get, default=0)
     client = multi_clients.get(index)
     if not client: raise HTTPException(503, "No available clients to stream.")
-
-    if client in class_cache:
-        tg_connect = class_cache[client]
-    else:
-        tg_connect = ByteStreamer(client)
-        class_cache[client] = tg_connect
-
+    if client in class_cache: tg_connect = class_cache[client]
+    else: tg_connect = ByteStreamer(client); class_cache[client] = tg_connect
     try:
         message = await client.get_messages(Config.STORAGE_CHANNEL, msg_id)
-        if not (message.video or message.document or message.audio) or message.empty:
-            raise FileNotFoundError
-
+        if not (message.video or message.document or message.audio) or message.empty: raise FileNotFoundError
         media = message.document or message.video or message.audio
         file_id = FileId.decode(media.file_id)
         file_size = media.file_size
-        
         from_bytes, until_bytes = 0, file_size - 1
         if range_header:
             from_bytes_str, until_bytes_str = range_header.replace("bytes=", "").split("-")
             from_bytes = int(from_bytes_str)
-            if until_bytes_str:
-                until_bytes = int(until_bytes_str)
-
+            if until_bytes_str: until_bytes = int(until_bytes_str)
         if (until_bytes >= file_size) or (from_bytes < 0): raise HTTPException(416)
-
         chunk_size = 1024 * 1024
         req_length = until_bytes - from_bytes + 1
         offset = from_bytes - (from_bytes % chunk_size)
         first_part_cut = from_bytes - offset
         last_part_cut = (until_bytes % chunk_size) + 1
         part_count = math.ceil(req_length / chunk_size)
-
         body = tg_connect.yield_file(file_id, index, offset, first_part_cut, last_part_cut, part_count, chunk_size)
-
         return StreamingResponse(
-            content=body,
-            status_code=206 if range_header else 200,
+            content=body, status_code=206 if range_header else 200,
             headers={
                 "Content-Type": media.mime_type or "application/octet-stream",
                 "Content-Range": f"bytes {from_bytes}-{until_bytes}/{file_size}",
@@ -173,7 +159,5 @@ async def stream_handler(request: Request, msg_id: int):
                 "Content-Disposition": f'inline; filename="{media.file_name}"'
             },
         )
-    except FileNotFoundError:
-        raise HTTPException(404, "File not found on Telegram.")
-    except Exception:
-        print(f"Error in /dl: {traceback.format_exc()}"); raise HTTPException(500)
+    except FileNotFoundError: raise HTTPException(404, "File not found on Telegram.")
+    except Exception: print(f"Error in /dl: {traceback.format_exc()}"); raise HTTPException(500)
