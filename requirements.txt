@@ -2,7 +2,5 @@ fastapi[standard]
 pyrogram
 tgcrypto
 python-dotenv
-aiohttp
-aiofiles
 python-magic
 motor
