@@ -12,8 +12,7 @@ from pyrogram import Client, filters, enums
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, ChatMemberUpdated
 from pyrogram.errors import FloodWait, UserNotParticipant
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import HTMLResponse, StreamingResponse
-from fastapi.templating import Jinja2Templates
+from fastapi.responses import JSONResponse, StreamingResponse # HTMLResponse/Templates ki ab zaroorat nahi
 from pyrogram.file_id import FileId
 from pyrogram import raw
 from pyrogram.session import Session, Auth
@@ -86,7 +85,6 @@ async def lifespan(app: FastAPI):
 
 # FastAPI app ko lifespan ke saath initialize karo
 app = FastAPI(lifespan=lifespan)
-templates = Jinja2Templates(directory="templates")
 
 # Pyrogram bot ko initialize karo
 bot = Client("SimpleStreamBot", api_id=Config.API_ID, api_hash=Config.API_HASH, bot_token=Config.BOT_TOKEN, in_memory=True)
@@ -183,8 +181,12 @@ async def start_command(client: Client, message: Message):
                 )
                 return # Function ko yahin rok do
 
-        # Agar user member hai (ya force sub on nahi hai), toh use asli link do
-        final_link = f"{Config.BLOGGER_PAGE_URL}?id={unique_id}" if Config.BLOGGER_PAGE_URL else f"{Config.BASE_URL}/show/{unique_id}"
+        # Agar user member hai, toh use ab PEHLA (Redirect) Blogger link do
+        if not Config.REDIRECT_BLOGGER_URL:
+            await message.reply_text("Error: Redirect Blogger URL server par set nahi hai.")
+            return
+
+        final_link = f"{Config.REDIRECT_BLOGGER_URL}?id={unique_id}"
         
         reply_text = f"__✅ Verification Successful!\n\nCopy Link:__ `{final_link}`"
         
@@ -193,7 +195,7 @@ async def start_command(client: Client, message: Message):
         await message.reply_text(reply_text, reply_markup=button, quote=True, disable_web_page_preview=True)
 
     else:
-        # Agar simple /start command hai, toh welcome message do
+        # Agar simple /start command hai, toh aapka custom welcome message
         reply_text = f"""
 👋 **Hello, {user_name}!**
 
@@ -217,6 +219,7 @@ async def handle_file_upload(message: Message, user_id: int):
         
         button = InlineKeyboardMarkup([[InlineKeyboardButton("Get Link Now", url=verify_link)]])
         
+        # Aapka custom file upload message
         await message.reply_text(
             "__✅ File Uploaded!__",
             reply_markup=button,
@@ -282,6 +285,45 @@ async def cleanup_channel(client: Client):
 # --- FASTAPI WEB SERVER: Browser se aane wali requests ko handle karna ---
 # =====================================================================================
 
+# /show wala route ab nahi hai.
+
+@app.get("/api/file/{unique_id}", response_class=JSONResponse)
+async def get_file_details_api(request: Request, unique_id: str):
+    """
+    Aapka DUSRA Blogger page is route ko call karke file ki details lega.
+    """
+    message_id = await db.get_link(unique_id)
+    if not message_id:
+        raise HTTPException(status_code=404, detail="Link expired or invalid.")
+    
+    main_bot = multi_clients.get(0)
+    if not main_bot:
+        raise HTTPException(status_code=503, detail="Bot is not ready.")
+        
+    try:
+        message = await main_bot.get_messages(Config.STORAGE_CHANNEL, message_id)
+    except Exception:
+        raise HTTPException(status_code=404, detail="File not found on Telegram.")
+        
+    media = message.document or message.video or message.audio
+    if not media:
+        raise HTTPException(status_code=404, detail="Media not found in the message.")
+        
+    file_name = media.file_name or "file"
+    safe_file_name = "".join(c for c in file_name if c.isalnum() or c in (' ', '.', '_', '-')).rstrip()
+    mime_type = media.mime_type or "application/octet-stream"
+
+    # File ki details JSON format mein bhejo
+    response_data = {
+        "file_name": mask_filename(file_name),
+        "file_size": get_readable_file_size(media.file_size),
+        "is_media": mime_type.startswith(("video", "audio")),
+        "direct_dl_link": f"{Config.BASE_URL}/dl/{message_id}/{safe_file_name}",
+        "mx_player_link": f"intent:{Config.BASE_URL}/dl/{message_id}/{safe_file_name}#Intent;action=android.intent.action.VIEW;type={mime_type};end",
+        "vlc_player_link": f"vlc://{Config.BASE_URL}/dl/{message_id}/{safe_file_name}"
+    }
+    return response_data
+
 class ByteStreamer:
     """Telegram se file ke parts download karne ka kaam karta hai."""
     def __init__(self, client: Client):
@@ -333,41 +375,6 @@ class ByteStreamer:
                 offset += chunk_size
         finally:
             work_loads[index] -= 1
-
-@app.get("/show/{unique_id}", response_class=HTMLResponse)
-async def show_page(request: Request, unique_id: str):
-    """Download page dikhata hai."""
-    message_id = await db.get_link(unique_id)
-    if not message_id:
-        raise HTTPException(status_code=404, detail="Link expired or invalid.")
-    
-    main_bot = multi_clients.get(0)
-    if not main_bot:
-        raise HTTPException(status_code=503, detail="Bot is not ready.")
-        
-    try:
-        message = await main_bot.get_messages(Config.STORAGE_CHANNEL, message_id)
-    except Exception:
-        raise HTTPException(status_code=404, detail="File not found on Telegram.")
-        
-    media = message.document or message.video or message.audio
-    if not media:
-        raise HTTPException(status_code=404, detail="Media not found in the message.")
-        
-    file_name = media.file_name or "file"
-    safe_file_name = "".join(c for c in file_name if c.isalnum() or c in (' ', '.', '_', '-')).rstrip()
-    mime_type = media.mime_type or "application/octet-stream"
-
-    context = {
-        "request": request,
-        "file_name": mask_filename(file_name),
-        "file_size": get_readable_file_size(media.file_size),
-        "is_media": mime_type.startswith(("video", "audio")),
-        "direct_dl_link": f"{Config.BASE_URL}/dl/{message_id}/{safe_file_name}",
-        "mx_player_link": f"intent:{Config.BASE_URL}/dl/{message_id}/{safe_file_name}#Intent;action=android.intent.action.VIEW;type={mime_type};end",
-        "vlc_player_link": f"vlc://{Config.BASE_URL}/dl/{message_id}/{safe_file_name}"
-    }
-    return templates.TemplateResponse("show.html", context)
 
 @app.get("/dl/{message_id}/{file_name}")
 async def stream_media(request: Request, message_id: int, file_name: str):
