@@ -12,6 +12,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Ab baaki ka saara project code copy karo
 COPY . .
 
+# --- YAHAN BADLAV KIYA GAYA HAI ---
+# Session files save karne ke liye 'sessions' naam ka folder banao
+RUN mkdir sessions
+
 # start.sh ko run karne ki permission do
 RUN chmod +x start.sh
 
