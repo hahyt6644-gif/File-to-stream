@@ -76,6 +76,10 @@
 
         <!-- Content -->
         <div id="content-container" style="display:none">
+            
+            <!-- Video Player -->
+            <video id="video-player" class="w-full rounded-xl mb-4" controls style="display:none"></video>
+
             <h2 id="file-name" class="text-xl sm:text-2xl font-bold break-words"></h2>
             <p id="file-size" class="text-gray-400 mt-1 mb-6"></p>
 
@@ -104,6 +108,7 @@ async function fetchFileData() {
     const fileNameEl = document.getElementById("file-name");
     const fileSizeEl = document.getElementById("file-size");
     const buttonContainer = document.getElementById("button-container");
+    const videoPlayer = document.getElementById("video-player");
 
     try {
         const res = await fetch(`${BASE_URL}/api/file/${FILE_ID}`);
@@ -114,10 +119,14 @@ async function fetchFileData() {
 
         fileNameEl.innerText = data.file_name;
         fileSizeEl.innerText = `Size • ${data.file_size}`;
-
         buttonContainer.innerHTML = "";
 
         if (data.is_media) {
+            // Show video player
+            videoPlayer.src = data.direct_dl_link;
+            videoPlayer.style.display = "block";
+
+            // Android intents
             const mx = `intent:${data.direct_dl_link}#Intent;action=android.intent.action.VIEW;type=video/*;end`;
             const vlc = `intent:${data.direct_dl_link}#Intent;action=android.intent.action.VIEW;type=video/*;package=org.videolan.vlc;end`;
 
@@ -127,6 +136,8 @@ async function fetchFileData() {
                 <a href="${vlc}" class="btn btn-secondary">▶ Play in VLC</a>
             `;
         } else {
+            // Hide video player for non-media
+            videoPlayer.style.display = "none";
             buttonContainer.innerHTML = `
                 <a href="${data.direct_dl_link}" class="btn btn-primary">⬇ Download File</a>
             `;
@@ -140,7 +151,10 @@ async function fetchFileData() {
     }
 }
 
+// Fetch file on page load
 fetchFileData();
+
+// Disable right-click
 document.addEventListener("contextmenu", e => e.preventDefault());
 </script>
 
